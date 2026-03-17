@@ -1,72 +1,20 @@
 const express = require("express");
-const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
-const { defaultSpaces, defaultReservations } = require("./lib/default-data");
+const { pool, initializeDatabase, withTransaction } = require("./lib/database");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const APP_BASE_PATH = "/reservation";
 const PUBLIC_DIR = path.join(__dirname, "public");
 
-const DATA_DIR = path.join(__dirname, "data");
-const SPACES_FILE = path.join(DATA_DIR, "spaces.json");
-const RESERVATIONS_FILE = path.join(DATA_DIR, "reservations.json");
-
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^\d{2}:\d{2}$/;
 const PIN_PATTERN = /^\d{4,8}$/;
 const MAX_RESERVATION_MINUTES = 4 * 60;
 
-let writeQueue = Promise.resolve();
-
-function cloneData(data) {
-  return JSON.parse(JSON.stringify(data));
-}
-
-async function writeJson(filePath, data) {
-  await fs.writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-}
-
-async function readJson(filePath, fallback) {
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return JSON.parse(raw);
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      return cloneData(fallback);
-    }
-    throw error;
-  }
-}
-
-async function ensureFile(filePath, fallback) {
-  try {
-    await fs.access(filePath);
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      await writeJson(filePath, fallback);
-      return;
-    }
-    throw error;
-  }
-}
-
-async function ensureDataFiles() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  await ensureFile(SPACES_FILE, defaultSpaces);
-  await ensureFile(RESERVATIONS_FILE, defaultReservations);
-}
-
-function withWriteLock(task) {
-  const run = writeQueue.then(() => task());
-  writeQueue = run.catch(() => undefined);
-  return run;
-}
-
-function toMinutes(time) {
-  const [hours, minutes] = time.split(":").map(Number);
-  return (hours * 60) + minutes;
+function normalizeString(value) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function isValidDate(value) {
@@ -101,21 +49,66 @@ function isValidTime(value) {
   );
 }
 
+function toMinutes(time) {
+  const [hours, minutes] = time.split(":").map(Number);
+  return (hours * 60) + minutes;
+}
+
+function normalizeDbDate(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10);
+  }
+
+  return String(value).slice(0, 10);
+}
+
+function normalizeDbTime(value) {
+  if (!value) {
+    return null;
+  }
+
+  const raw = String(value).trim();
+  if (!raw.includes(":")) {
+    return null;
+  }
+
+  const [hours, minutes] = raw.split(":");
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function mapSpaceRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    capacity: Number(row.capacity),
+    openTime: normalizeDbTime(row.open_time),
+    closeTime: normalizeDbTime(row.close_time)
+  };
+}
+
+function mapReservationRow(row) {
+  return {
+    id: row.id,
+    spaceId: row.space_id,
+    date: normalizeDbDate(row.date),
+    startTime: normalizeDbTime(row.start_time),
+    endTime: normalizeDbTime(row.end_time),
+    residentName: row.resident_name,
+    roomNumber: row.room_number,
+    note: row.note || "",
+    cancellationPinHash: row.cancellation_pin_hash,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at)
+  };
+}
+
 function toPublicReservation(reservation) {
-  const { cancellationCode, cancellationPinHash, ...publicReservation } = reservation;
+  const { cancellationPinHash, ...publicReservation } = reservation;
   return publicReservation;
-}
-
-function sortReservations(reservations) {
-  return reservations.slice().sort((a, b) => {
-    const first = `${a.date}T${a.startTime}`;
-    const second = `${b.date}T${b.startTime}`;
-    return first.localeCompare(second);
-  });
-}
-
-function normalizeString(value) {
-  return typeof value === "string" ? value.trim() : "";
 }
 
 function hasAvailabilityWindow(space) {
@@ -130,23 +123,37 @@ function hashText(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-function getReservationEndDate(reservation) {
-  if (!isValidDate(reservation.date) || !isValidTime(reservation.endTime)) {
-    return null;
+function buildReservationWhereClause(filters, activeOnly) {
+  const conditions = [];
+  const values = [];
+
+  if (filters.spaceId) {
+    values.push(filters.spaceId);
+    conditions.push(`space_id = $${values.length}`);
   }
 
-  const [year, month, day] = reservation.date.split("-").map(Number);
-  const [hours, minutes] = reservation.endTime.split(":").map(Number);
-  return new Date(year, month - 1, day, hours, minutes, 0, 0);
-}
-
-function isActiveReservation(reservation, now = new Date()) {
-  const reservationEnd = getReservationEndDate(reservation);
-  if (!reservationEnd) {
-    return false;
+  if (filters.date) {
+    values.push(filters.date);
+    conditions.push(`date = $${values.length}::date`);
   }
 
-  return reservationEnd.getTime() >= now.getTime();
+  if (filters.roomNumber) {
+    values.push(filters.roomNumber.toLowerCase());
+    conditions.push(`LOWER(room_number) = $${values.length}`);
+  }
+
+  if (activeOnly) {
+    conditions.push("(date > CURRENT_DATE OR (date = CURRENT_DATE AND end_time >= CURRENT_TIME))");
+  }
+
+  if (conditions.length === 0) {
+    return { whereSql: "", values };
+  }
+
+  return {
+    whereSql: `WHERE ${conditions.join(" AND ")}`,
+    values
+  };
 }
 
 app.use(express.json());
@@ -164,8 +171,15 @@ app.get(`${APP_BASE_PATH}/api/health`, (_req, res) => {
 
 app.get(`${APP_BASE_PATH}/api/spaces`, async (_req, res, next) => {
   try {
-    const spaces = await readJson(SPACES_FILE, defaultSpaces);
-    res.json(spaces);
+    const result = await pool.query(
+      `
+        SELECT id, name, description, capacity, open_time, close_time
+        FROM spaces
+        ORDER BY id ASC
+      `
+    );
+
+    res.json(result.rows.map(mapSpaceRow));
   } catch (error) {
     next(error);
   }
@@ -180,27 +194,33 @@ app.get(`${APP_BASE_PATH}/api/reservations`, async (req, res, next) => {
       roomNumber: normalizeString(req.query.roomNumber)
     };
 
-    let reservations = await readJson(RESERVATIONS_FILE, defaultReservations);
-
-    if (filters.spaceId) {
-      reservations = reservations.filter((item) => item.spaceId === filters.spaceId);
+    if (filters.date && !isValidDate(filters.date)) {
+      return res.status(400).json({ error: "Invalid date filter. Use YYYY-MM-DD format." });
     }
 
-    if (filters.date) {
-      reservations = reservations.filter((item) => item.date === filters.date);
-    }
+    const { whereSql, values } = buildReservationWhereClause(filters, activeOnly);
 
-    if (filters.roomNumber) {
-      reservations = reservations.filter((item) => (
-        String(item.roomNumber || "").toLowerCase() === filters.roomNumber.toLowerCase()
-      ));
-    }
+    const result = await pool.query(
+      `
+        SELECT
+          id,
+          space_id,
+          date,
+          start_time,
+          end_time,
+          resident_name,
+          room_number,
+          note,
+          cancellation_pin_hash,
+          created_at
+        FROM reservations
+        ${whereSql}
+        ORDER BY date ASC, start_time ASC
+      `,
+      values
+    );
 
-    if (activeOnly) {
-      reservations = reservations.filter((item) => isActiveReservation(item));
-    }
-
-    res.json(sortReservations(reservations).map(toPublicReservation));
+    res.json(result.rows.map(mapReservationRow).map(toPublicReservation));
   } catch (error) {
     next(error);
   }
@@ -257,12 +277,20 @@ app.post(`${APP_BASE_PATH}/api/reservations`, async (req, res, next) => {
       return res.status(400).json({ error: "Cancellation PIN must be 4 to 8 digits." });
     }
 
-    const spaces = await readJson(SPACES_FILE, defaultSpaces);
-    const selectedSpace = spaces.find((space) => space.id === payload.spaceId);
+    const spaceResult = await pool.query(
+      `
+        SELECT id, name, open_time, close_time
+        FROM spaces
+        WHERE id = $1
+      `,
+      [payload.spaceId]
+    );
 
-    if (!selectedSpace) {
+    if (spaceResult.rowCount === 0) {
       return res.status(404).json({ error: "Space not found." });
     }
+
+    const selectedSpace = mapSpaceRow(spaceResult.rows[0]);
 
     if (hasAvailabilityWindow(selectedSpace)) {
       const openingMinutes = toMinutes(selectedSpace.openTime);
@@ -275,48 +303,74 @@ app.post(`${APP_BASE_PATH}/api/reservations`, async (req, res, next) => {
       }
     }
 
-    const createdReservation = await withWriteLock(async () => {
-      const reservations = await readJson(RESERVATIONS_FILE, defaultReservations);
+    const createdReservation = await withTransaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`${payload.spaceId}:${payload.date}`]);
 
-      const hasOverlap = reservations.some((item) => {
-        if (item.spaceId !== payload.spaceId || item.date !== payload.date) {
-          return false;
-        }
+      const overlapResult = await client.query(
+        `
+          SELECT 1
+          FROM reservations
+          WHERE
+            space_id = $1
+            AND date = $2::date
+            AND $3::time < end_time
+            AND $4::time > start_time
+          LIMIT 1
+        `,
+        [payload.spaceId, payload.date, payload.startTime, payload.endTime]
+      );
 
-        return (
-          startMinutes < toMinutes(item.endTime)
-          && endMinutes > toMinutes(item.startTime)
-        );
-      });
-
-      if (hasOverlap) {
+      if (overlapResult.rowCount > 0) {
         const overlapError = new Error("The selected time slot is already booked.");
         overlapError.status = 409;
         throw overlapError;
       }
 
-      const reservation = {
-        id: crypto.randomUUID(),
-        spaceId: payload.spaceId,
-        date: payload.date,
-        startTime: payload.startTime,
-        endTime: payload.endTime,
-        residentName: payload.residentName,
-        roomNumber: payload.roomNumber,
-        note: payload.note,
-        cancellationPinHash: hashText(payload.cancellationPin),
-        createdAt: new Date().toISOString()
-      };
+      const insertResult = await client.query(
+        `
+          INSERT INTO reservations (
+            id,
+            space_id,
+            date,
+            start_time,
+            end_time,
+            resident_name,
+            room_number,
+            note,
+            cancellation_pin_hash
+          )
+          VALUES ($1, $2, $3::date, $4::time, $5::time, $6, $7, $8, $9)
+          RETURNING
+            id,
+            space_id,
+            date,
+            start_time,
+            end_time,
+            resident_name,
+            room_number,
+            note,
+            cancellation_pin_hash,
+            created_at
+        `,
+        [
+          crypto.randomUUID(),
+          payload.spaceId,
+          payload.date,
+          payload.startTime,
+          payload.endTime,
+          payload.residentName,
+          payload.roomNumber,
+          payload.note,
+          hashText(payload.cancellationPin)
+        ]
+      );
 
-      reservations.push(reservation);
-      await writeJson(RESERVATIONS_FILE, sortReservations(reservations));
-
-      return reservation;
+      return mapReservationRow(insertResult.rows[0]);
     });
 
     return res.status(201).json({
       message: "Reservation confirmed.",
-      reservation: createdReservation
+      reservation: toPublicReservation(createdReservation)
     });
   } catch (error) {
     next(error);
@@ -350,32 +404,51 @@ app.delete(`${APP_BASE_PATH}/api/reservations/:id`, async (req, res, next) => {
       return res.status(400).json({ error: "Full name is required." });
     }
 
-    const deleted = await withWriteLock(async () => {
-      const reservations = await readJson(RESERVATIONS_FILE, defaultReservations);
-      const index = reservations.findIndex((item) => item.id === reservationId);
+    const deleted = await withTransaction(async (client) => {
+      const reservationResult = await client.query(
+        `
+          SELECT
+            id,
+            resident_name,
+            room_number,
+            cancellation_pin_hash
+          FROM reservations
+          WHERE id = $1
+          FOR UPDATE
+        `,
+        [reservationId]
+      );
 
-      if (index === -1) {
+      if (reservationResult.rowCount === 0) {
         const notFound = new Error("Reservation not found.");
         notFound.status = 404;
         throw notFound;
       }
 
-      if (reservations[index].cancellationPinHash !== hashText(cancellationPin)) {
+      const reservation = reservationResult.rows[0];
+
+      if (reservation.cancellation_pin_hash !== hashText(cancellationPin)) {
         const unauthorized = new Error("Wrong cancellation PIN.");
         unauthorized.status = 401;
         throw unauthorized;
       }
 
-      if (!sameText(reservations[index].roomNumber, roomNumber) || !sameText(reservations[index].residentName, residentName)) {
+      if (!sameText(reservation.room_number, roomNumber) || !sameText(reservation.resident_name, residentName)) {
         const forbidden = new Error("Only the reservation owner can cancel this booking.");
         forbidden.status = 403;
         throw forbidden;
       }
 
-      const [removed] = reservations.splice(index, 1);
-      await writeJson(RESERVATIONS_FILE, sortReservations(reservations));
+      const deleteResult = await client.query(
+        `
+          DELETE FROM reservations
+          WHERE id = $1
+          RETURNING id
+        `,
+        [reservationId]
+      );
 
-      return removed;
+      return deleteResult.rows[0];
     });
 
     res.json({
@@ -395,7 +468,7 @@ app.use((error, _req, res, _next) => {
   });
 });
 
-ensureDataFiles()
+initializeDatabase()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`Server running at http://localhost:${PORT}${APP_BASE_PATH}`);
