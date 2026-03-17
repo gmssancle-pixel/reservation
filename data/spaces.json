@@ -4,15 +4,15 @@
     "name": "TV Room",
     "description": "Shared room for watching TV and small social events.",
     "capacity": 12,
-    "openTime": "10:00",
-    "closeTime": "23:00"
+    "openTime": null,
+    "closeTime": null
   },
   {
     "id": "music-room",
     "name": "Music Room",
     "description": "Dedicated room for music practice and rehearsal sessions.",
     "capacity": 6,
-    "openTime": "09:00",
-    "closeTime": "22:00"
+    "openTime": null,
+    "closeTime": null
   }
 ]

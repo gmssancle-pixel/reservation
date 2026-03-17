@@ -15,6 +15,7 @@ const RESERVATIONS_FILE = path.join(DATA_DIR, "reservations.json");
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^\d{2}:\d{2}$/;
+const MAX_RESERVATION_MINUTES = 4 * 60;
 
 let writeQueue = Promise.resolve();
 
@@ -116,6 +117,14 @@ function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function hasAvailabilityWindow(space) {
+  return isValidTime(space.openTime) && isValidTime(space.closeTime);
+}
+
+function sameText(first, second) {
+  return normalizeString(first).toLowerCase() === normalizeString(second).toLowerCase();
+}
+
 app.use(express.json());
 app.get("/", (_req, res) => {
   res.redirect(APP_BASE_PATH);
@@ -209,6 +218,10 @@ app.post(`${APP_BASE_PATH}/api/reservations`, async (req, res, next) => {
       return res.status(400).json({ error: "End time must be after start time." });
     }
 
+    if ((endMinutes - startMinutes) > MAX_RESERVATION_MINUTES) {
+      return res.status(400).json({ error: "A reservation cannot be longer than 4 hours." });
+    }
+
     const spaces = await readJson(SPACES_FILE, defaultSpaces);
     const selectedSpace = spaces.find((space) => space.id === payload.spaceId);
 
@@ -216,13 +229,15 @@ app.post(`${APP_BASE_PATH}/api/reservations`, async (req, res, next) => {
       return res.status(404).json({ error: "Space not found." });
     }
 
-    const openingMinutes = toMinutes(selectedSpace.openTime);
-    const closingMinutes = toMinutes(selectedSpace.closeTime);
+    if (hasAvailabilityWindow(selectedSpace)) {
+      const openingMinutes = toMinutes(selectedSpace.openTime);
+      const closingMinutes = toMinutes(selectedSpace.closeTime);
 
-    if (startMinutes < openingMinutes || endMinutes > closingMinutes) {
-      return res.status(400).json({
-        error: `This space is available between ${selectedSpace.openTime} and ${selectedSpace.closeTime}.`
-      });
+      if (startMinutes < openingMinutes || endMinutes > closingMinutes) {
+        return res.status(400).json({
+          error: `This space is available between ${selectedSpace.openTime} and ${selectedSpace.closeTime}.`
+        });
+      }
     }
 
     const createdReservation = await withWriteLock(async () => {
@@ -277,6 +292,8 @@ app.delete(`${APP_BASE_PATH}/api/reservations/:id`, async (req, res, next) => {
   try {
     const reservationId = normalizeString(req.params.id);
     const cancellationCode = normalizeString(req.body.cancellationCode).toUpperCase();
+    const roomNumber = normalizeString(req.body.roomNumber);
+    const residentName = normalizeString(req.body.residentName);
 
     if (!reservationId) {
       return res.status(400).json({ error: "Invalid reservation ID." });
@@ -284,6 +301,14 @@ app.delete(`${APP_BASE_PATH}/api/reservations/:id`, async (req, res, next) => {
 
     if (!cancellationCode) {
       return res.status(400).json({ error: "Cancellation code is required." });
+    }
+
+    if (!roomNumber) {
+      return res.status(400).json({ error: "Room number is required." });
+    }
+
+    if (!residentName) {
+      return res.status(400).json({ error: "Full name is required." });
     }
 
     const deleted = await withWriteLock(async () => {
@@ -300,6 +325,12 @@ app.delete(`${APP_BASE_PATH}/api/reservations/:id`, async (req, res, next) => {
         const unauthorized = new Error("Wrong cancellation code.");
         unauthorized.status = 401;
         throw unauthorized;
+      }
+
+      if (!sameText(reservations[index].roomNumber, roomNumber) || !sameText(reservations[index].residentName, residentName)) {
+        const forbidden = new Error("Only the reservation owner can cancel this booking.");
+        forbidden.status = 403;
+        throw forbidden;
       }
 
       const [removed] = reservations.splice(index, 1);

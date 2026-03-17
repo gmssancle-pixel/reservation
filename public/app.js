@@ -12,6 +12,7 @@ const reservationsList = document.getElementById("reservations-list");
 const refreshBtn = document.getElementById("refresh-btn");
 
 const BASE_PATH = "/reservation";
+const MAX_RESERVATION_MINUTES = 4 * 60;
 let spaces = [];
 
 function setMessage(element, text, type = "info") {
@@ -21,6 +22,15 @@ function setMessage(element, text, type = "info") {
 
 function clearMessage(element) {
   setMessage(element, "", "info");
+}
+
+function toMinutes(time) {
+  if (!time || !time.includes(":")) {
+    return NaN;
+  }
+
+  const [hours, minutes] = time.split(":").map(Number);
+  return (hours * 60) + minutes;
 }
 
 function todayAsISO() {
@@ -63,13 +73,21 @@ function getSpaceName(spaceId) {
   return space ? space.name : spaceId;
 }
 
+function getSpaceAvailabilityLabel(space) {
+  if (space.openTime && space.closeTime) {
+    return `${space.openTime}-${space.closeTime}`;
+  }
+
+  return "Unlimited";
+}
+
 function renderSpaces() {
   spaceSelect.innerHTML = "";
 
   spaces.forEach((space) => {
     const option = document.createElement("option");
     option.value = space.id;
-    option.textContent = `${space.name} (${space.openTime}-${space.closeTime})`;
+    option.textContent = `${space.name} (${getSpaceAvailabilityLabel(space)})`;
     spaceSelect.append(option);
   });
 }
@@ -150,6 +168,19 @@ async function handleBookingSubmit(event) {
     note: noteInput.value
   };
 
+  const startMinutes = toMinutes(payload.startTime);
+  const endMinutes = toMinutes(payload.endTime);
+
+  if (Number.isNaN(startMinutes) || Number.isNaN(endMinutes)) {
+    setMessage(formMessage, "Please select a valid start and end time.", "error");
+    return;
+  }
+
+  if ((endMinutes - startMinutes) > MAX_RESERVATION_MINUTES) {
+    setMessage(formMessage, "A reservation cannot be longer than 4 hours.", "error");
+    return;
+  }
+
   try {
     const result = await apiRequest(`${BASE_PATH}/api/reservations`, {
       method: "POST",
@@ -185,10 +216,24 @@ async function handleReservationCancel(event) {
     return;
   }
 
+  const roomNumber = window.prompt("Enter your room number:");
+  if (!roomNumber) {
+    return;
+  }
+
+  const residentName = window.prompt("Enter the full name used for the reservation:");
+  if (!residentName) {
+    return;
+  }
+
   try {
     await apiRequest(`${BASE_PATH}/api/reservations/${reservationId}`, {
       method: "DELETE",
-      body: JSON.stringify({ cancellationCode })
+      body: JSON.stringify({
+        cancellationCode,
+        roomNumber,
+        residentName
+      })
     });
 
     setMessage(formMessage, "Reservation deleted successfully.", "success");

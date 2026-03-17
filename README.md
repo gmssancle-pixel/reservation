@@ -5,10 +5,12 @@ Complete web app to manage shared-space reservations in a residence.
 ## Features
 
 - TV Room and Music Room availability
+- unlimited booking hours (no opening/closing time restrictions)
 - reservation creation with field validation
+- maximum reservation duration: 4 hours
 - automatic overlap prevention for same space/date
 - reservation list filtered by space and date
-- reservation cancellation with unique code
+- reservation cancellation restricted to owner (cancellation code + room number + full name)
 - local JSON data persistence
 
 ## Requirements
@@ -45,4 +47,6 @@ Open `http://localhost:3000/reservation` in your browser.
 - `GET /reservation/api/spaces`
 - `GET /reservation/api/reservations?spaceId=...&date=YYYY-MM-DD`
 - `POST /reservation/api/reservations`
+  - rejects reservations longer than 4 hours
 - `DELETE /reservation/api/reservations/:id`
+  - requires `cancellationCode`, `roomNumber`, `residentName`
