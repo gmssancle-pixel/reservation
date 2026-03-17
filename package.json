@@ -1,0 +1,20 @@
+{
+  "name": "residenza-prenotazioni",
+  "version": "1.0.0",
+  "description": "Sito web per la prenotazione degli spazi in una residenza",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "reset-data": "node scripts/reset-data.js"
+  },
+  "keywords": [
+    "prenotazioni",
+    "residenza",
+    "booking"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
