@@ -73,21 +73,13 @@ function getSpaceName(spaceId) {
   return space ? space.name : spaceId;
 }
 
-function getSpaceAvailabilityLabel(space) {
-  if (space.openTime && space.closeTime) {
-    return `${space.openTime}-${space.closeTime}`;
-  }
-
-  return "Unlimited";
-}
-
 function renderSpaces() {
   spaceSelect.innerHTML = "";
 
   spaces.forEach((space) => {
     const option = document.createElement("option");
     option.value = space.id;
-    option.textContent = `${space.name} (${getSpaceAvailabilityLabel(space)})`;
+    option.textContent = space.name;
     spaceSelect.append(option);
   });
 }
