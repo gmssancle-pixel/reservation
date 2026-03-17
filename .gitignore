@@ -6,3 +6,10 @@ node_modules/
 .amplify
 amplify_outputs*
 amplifyconfiguration*
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
