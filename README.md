@@ -31,6 +31,19 @@ Complete web app to manage shared-space reservations in a residence.
 
 The app auto-creates tables and seeds spaces (`TV Room`, `Music Room`) on startup.
 
+## AWS Amplify Hosting setup (Express / web compute)
+
+1. Push this repository to GitHub (including `amplify.yml` and `deploy-manifest.json`).
+2. In Amplify, create a new app from the repository.
+3. In Amplify app settings, set env var:
+   - `DATABASE_URL=<your-postgres-url>`
+4. Deploy.
+
+Important:
+- the Amplify build uses Node.js 22 (`amplify.yml`)
+- the output bundle is generated in `.amplify-hosting`
+- app URL must include `/reservation`
+
 ## Local quick start
 
 ```bash

@@ -1,2 +1,8 @@
 node_modules/
 .DS_Store
+.amplify-hosting/
+
+# amplify
+.amplify
+amplify_outputs*
+amplifyconfiguration*
